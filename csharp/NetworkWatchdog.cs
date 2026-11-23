@@ -13,6 +13,8 @@
 //       Disable و سپس Enable (ری‌استارت) می‌شوند
 //    4) در اولین اجرا، خود را در استارتآپ ویندوز (Scheduled Task) ثبت می‌کند
 //    5) آیکون کنار ساعت: سبز = سالم | نارنجی = فقط اینترنت قطع | قرمز = قطع کامل
+//    6) حذف کامل برنامه (Uninstall) از منوی آیکون: پاک کردن استارتآپ،
+//       بستن برنامه، حذف EXE و در صورت درخواست، پاک کردن تنظیمات و لاگ
 // ============================================================================
 
 using System;
@@ -34,6 +36,14 @@ using System.Xml.Serialization;
 
 namespace NetworkWatchdog
 {
+    // ========================================================================
+    //  اطلاعات نسخه
+    // ========================================================================
+    internal static class AppInfo
+    {
+        public const string Version = "2.1.0";
+    }
+
     // ========================================================================
     //  تنظیمات برنامه - در %APPDATA%\NetworkWatchdog\settings.xml ذخیره می‌شود
     // ========================================================================
@@ -183,6 +193,11 @@ namespace NetworkWatchdog
         public static string FilePath
         {
             get { return _path; }
+        }
+
+        public static string Dir
+        {
+            get { return Path.GetDirectoryName(_path); }
         }
 
         public static void Configure(int maxKb)
@@ -477,6 +492,16 @@ namespace NetworkWatchdog
             {
                 Logger.Write("WARN", "خطای رجیستری: " + ex.Message);
             }
+        }
+
+        // حذف آثار نسخه قدیمی PowerShell (v1) در صورت ارتقا به نسخه C#
+        public static void CleanupLegacy()
+        {
+            try
+            {
+                RunCmd("schtasks", "/Delete /TN NetworkWatchdog_AutoStart /F");
+            }
+            catch { }
         }
 
         static int RunCmd(string exe, string args)
@@ -789,6 +814,7 @@ namespace NetworkWatchdog
         ToolStripMenuItem _miViewLog;
         ToolStripMenuItem _miOpenLogDir;
         ToolStripMenuItem _miStartup;
+        ToolStripMenuItem _miUninstall;
         ToolStripMenuItem _miExit;
 
         public AppSettings CurrentSettings
@@ -809,7 +835,7 @@ namespace NetworkWatchdog
             }
 
             Logger.Write("INFO", "========================================================");
-            Logger.Write("INFO", "Network Watchdog شروع به کار کرد. نسخه: 1.0");
+            Logger.Write("INFO", "Network Watchdog شروع به کار کرد. نسخه: " + AppInfo.Version);
             Logger.Write("INFO", "نسخه ویندوز: " + Environment.OSVersion.VersionString);
             Logger.Write("INFO", "مسیر برنامه: " + StartupManager.ExePath);
             Logger.Write("INFO", "========================================================");
@@ -891,6 +917,11 @@ namespace NetworkWatchdog
             _miStartup.Checked = _settings.RunAtStartup && StartupManager.IsStartupEnabled();
             _miStartup.Click += new EventHandler(OnToggleStartup);
 
+            _miUninstall = new ToolStripMenuItem();
+            _miUninstall.Text = "حذف کامل برنامه (Uninstall)";
+            _miUninstall.ForeColor = Color.FromArgb(170, 40, 40);
+            _miUninstall.Click += new EventHandler(OnUninstall);
+
             _miExit = new ToolStripMenuItem();
             _miExit.Text = "خروج";
             _miExit.Click += new EventHandler(OnExit);
@@ -905,6 +936,7 @@ namespace NetworkWatchdog
             _menu.Items.Add(_miOpenLogDir);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_miStartup);
+            _menu.Items.Add(_miUninstall);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_miExit);
         }
@@ -1220,6 +1252,91 @@ namespace NetworkWatchdog
             _miStartup.Checked = want && StartupManager.IsStartupEnabled();
         }
 
+        // --------------------------------------------------------------------
+        //  حذف کامل برنامه (Uninstall)
+        // --------------------------------------------------------------------
+        void OnUninstall(object sender, EventArgs e)
+        {
+            DialogResult step1 = MessageBox.Show(
+                "آیا می‌خواهید Network Watchdog به‌طور کامل حذف شود؟\n\n" +
+                "این عملیات:\n" +
+                "-  برنامه را از استارتآپ ویندوز حذف می‌کند\n" +
+                "-  آثار نسخه قبلی (PowerShell) را هم پاک می‌کند\n" +
+                "-  برنامه را می‌بندد\n" +
+                "-  فایل NetworkWatchdog.exe را حذف می‌کند",
+                "حذف کامل برنامه",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (step1 != DialogResult.Yes) return;
+
+            DialogResult step2 = MessageBox.Show(
+                "فایل‌های تنظیمات و لاگ هم حذف شوند؟\n\n" +
+                SettingsStore.Dir + "\n" +
+                Logger.Dir + "\n\n" +
+                "(اگر No را انتخاب کنید، فقط برنامه و استارتآپ حذف می‌شود)",
+                "حذف داده‌ها",
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (step2 == DialogResult.Cancel) return;
+            bool deleteData = (step2 == DialogResult.Yes);
+
+            MessageBox.Show(
+                "حذف برنامه آغاز می‌شود.\n" +
+                "پس از بسته شدن برنامه، فایل‌ها به‌صورت خودکار در پس‌زمینه پاک می‌شوند.",
+                "حذف Network Watchdog",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            Uninstall(deleteData);
+        }
+
+        void Uninstall(bool deleteData)
+        {
+            try
+            {
+                Logger.Write("INFO", "شروع حذف کامل برنامه (Uninstall) - نسخه " + AppInfo.Version);
+
+                // 1) حذف از استارتآپ (تسک زمان‌بندی‌شده + رجیستری)
+                try { StartupManager.SetStartup(false); }
+                catch (Exception ex) { Logger.Write("WARN", "حذف استارتآپ: " + ex.Message); }
+
+                // 2) پاک کردن آثار نسخه قدیمی PowerShell (v1)
+                try { StartupManager.CleanupLegacy(); }
+                catch { }
+
+                // 3) حذف فایل EXE و داده‌ها پس از بسته شدن برنامه
+                //    (فرمان cmd با تاخیر اجرا می‌شود تا فرآیند کامل بسته شود؛
+                //     مسیرها مستقیم روی command line یونیکد ارسال می‌شوند تا
+                //     مشکلی با کاراکترهای فارسی مسیرها پیش نیاید)
+                try
+                {
+                    string exePath = StartupManager.ExePath;
+                    StringBuilder cmd = new StringBuilder();
+                    cmd.Append("/c ping 127.0.0.1 -n 8 >nul");
+                    cmd.Append(" & del \"").Append(exePath).Append("\"");
+                    if (deleteData)
+                    {
+                        cmd.Append(" & rmdir /s /q \"").Append(SettingsStore.Dir).Append("\"");
+                        cmd.Append(" & rmdir /s /q \"").Append(Logger.Dir).Append("\"");
+                    }
+                    ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", cmd.ToString());
+                    psi.CreateNoWindow = true;
+                    psi.UseShellExecute = false;
+                    using (Process p = Process.Start(psi)) { }
+                    Logger.Write("INFO", "اسکریپت حذف پس از خروج برنامه اجرا می‌شود.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Write("ERROR", "ساخت فرمان حذف ناموفق: " + ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("ERROR", "خطای حذف برنامه: " + ex.Message);
+            }
+            finally
+            {
+                Shutdown();
+            }
+        }
+
         void OnExit(object sender, EventArgs e)
         {
             Shutdown();
@@ -1231,7 +1348,13 @@ namespace NetworkWatchdog
             _wake.Set();
             try
             {
-                if (_worker != null && _worker.IsAlive) _worker.Join(4000);
+                if (_worker != null && _worker.IsAlive)
+                {
+                    // اگر ری‌استارت شبکه در حال انجام است بیشتر صبر کن تا
+                    // آداپتور در حالت غیرفعال رها نشود
+                    int waitMs = (_restarting == 1) ? 25000 : 4000;
+                    _worker.Join(waitMs);
+                }
             }
             catch { }
             try

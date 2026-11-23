@@ -22,7 +22,7 @@
 
 ## نسخه‌ها
 
-| | v1.0.0 (PowerShell) | v2.0.0 (C#/.NET) - پیشنهادی |
+| | v1.x (PowerShell) | v2.x (C#/.NET) - پیشنهادی |
 |---|---|---|
 | ویندوز | 8 / 8.1 / 10 / 11 | **7 SP1 / 8 / 8.1 / 10 / 11** |
 | خروجی | اسکریپت ps1 | **EXE مستقل** (فقط 50KB) |
@@ -32,9 +32,9 @@
 | استارتآپ خودکار | دارد | دارد (**بدون پنجره UAC** هنگام بوت) |
 | جلوگیری از اجرای همزمان | - | دارد (Mutex) |
 
-> نسخه v2.0.0 را مستقیم از بخش [Releases](../../releases) دانلود کنید - فایل `NetworkWatchdog.exe` آماده اجراست.
+> نسخه C# را مستقیم از بخش [Releases](../../releases) دانلود کنید - فایل `NetworkWatchdog.exe` آماده اجراست.
 
-## نصب سریع (v2.0.0)
+## نصب سریع (نسخه C#)
 
 1. `NetworkWatchdog.exe` را از [Releases](../../releases) دانلود کنید
 2. روی آن دوبار کلیک کنید (خودش درخواست UAC می‌دهد)
@@ -87,7 +87,17 @@
 | Windows 8 / 8.1 | هیچ چیز |
 | Windows 7 SP1 | در صورت نبود، یک‌بار [NET Framework 4.x.](https://dotnet.microsoft.com/download/dotnet-framework/net48) نصب کنید |
 
-## حذف برنامه
+## حذف برنامه (Uninstall)
+
+**روش 1 - از داخل خود برنامه (پیشنهادی):**
+
+کلیک راست روی آیکون ← **حذف کامل برنامه (Uninstall)** ← پاسخ به دو سوال (تایید حذف + حذف یا نگه‌داشتن داده‌ها). برنامه خودش: استارتآپ را پاک می‌کند، آثار نسخه قبلی PowerShell را حذف می‌کند، بسته می‌شود و فایل EXE و در صورت انتخاب، پوشه‌های تنظیمات و لاگ را حذف می‌کند.
+
+**روش 2 - اسکریپت مستقل (وقتی برنامه در حال اجرا نیست):**
+
+فایل `Uninstall.bat` در پوشه `csharp/` را **Run as administrator** کنید.
+
+**روش 3 - دستی:**
 
 1. کلیک راست روی آیکون ← خروج
 2. در `Task Scheduler` تسک `NetworkWatchdog` را حذف کنید
@@ -96,9 +106,17 @@
 ## ساختار مخزن
 
 ```
-v1.0-powershell/   →  نسخه PowerShell (ویندوز 8+)
-v2.0-csharp/       →  نسخه C#/.NET (ویندوز 7 SP1+)
+powershell/   →  نسخه 1.x PowerShell (ویندوز 8+)
+csharp/        →  نسخه 2.x C#/.NET (ویندوز 7 SP1+) - نسخه اصلی و پیشنهادی
 ```
+
+## تاریخچه نسخه‌ها
+
+| نسخه | توضیح |
+|---|---|
+| [v2.1.0](../../releases/tag/v2.1.0) | حذف کامل برنامه از منوی آیکون (Uninstall خودکار EXE و استارتآپ و داده‌ها) + اسکریپت Uninstall.bat مستقل + پاک‌سازی آثار نسخه PowerShell |
+| [v2.0.0](../../releases/tag/v2.0.0) | بازنویسی با C#/.NET: محافظت شبکه دوربین‌ها، ویندوز 7-11، آیکون System Tray، تنظیمات گرافیکی، خروجی EXE |
+| [v1.0.0](../../releases/tag/v1.0.0) | نسخه اولیه PowerShell |
 
 ## نکات فنی
 
@@ -110,7 +128,7 @@ v2.0-csharp/       →  نسخه C#/.NET (ویندوز 7 SP1+)
 
 ## English
 
-**Network Adaptor Auto Reset** is a Windows internet-connectivity watchdog. When both the internet AND the local network (e.g., the camera LAN gateway) are unreachable, it automatically restarts network adapters (disable/enable). If only the internet is down while the local camera network is healthy, it does NOT restart the network, so camera feeds stay alive. It runs as a system-tray icon (green/orange/red), auto-starts with Windows without a UAC prompt (scheduled task with highest privileges), and provides a Persian settings GUI. Compatible with Windows 7 SP1 through Windows 11 (.NET Framework 4.x, ~50 KB standalone EXE). v1.0.0 (PowerShell, Win8+) is also included in `v1.0-powershell/`.
+**Network Adaptor Auto Reset** is a Windows internet-connectivity watchdog. When both the internet AND the local network (e.g., the camera LAN gateway) are unreachable, it automatically restarts network adapters (disable/enable). If only the internet is down while the local camera network is healthy, it does NOT restart the network, so camera feeds stay alive. It runs as a system-tray icon (green/orange/red), auto-starts with Windows without a UAC prompt (scheduled task with highest privileges), provides a Persian settings GUI, and offers one-click in-app uninstall. Compatible with Windows 7 SP1 through Windows 11 (.NET Framework 4.x, ~50 KB standalone EXE). v1.x (PowerShell, Win8+) is also included in `powershell/`.
 
 ## مجوز
 
