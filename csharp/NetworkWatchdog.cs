@@ -9,11 +9,13 @@
 //    1) هر N ثانیه اتصال اینترنت بررسی می‌شود (Ping + TCP fallback)
 //    2) اگر اینترنت قطع ولی شبکه محلی (مثلاً 192.168.1.1) در دسترس بود،
 //       شبکه ری‌استارت نمی‌شود (دریافت تصاویر دوربین‌ها حفظ می‌شود)
-//    3) اگر هم اینترنت و هم شبکه محلی قطع بود، آداپتورهای شبکه فیزیکی
-//       Disable و سپس Enable (ری‌استارت) می‌شوند
+//    3) اگر هم اینترنت و هم شبکه محلی قطع بود، آداپتورها با منطق
+//       اسکریپت پایتون RestartNetworkAdaptors ری‌استارت می‌شوند:
+//       netsh (اصلی) -> WMI (جایگزین) -> PowerShell (آخرین) + تایید وضعیت
 //    4) در اولین اجرا، خود را در استارتآپ ویندوز (Scheduled Task) ثبت می‌کند
 //    5) آیکون کنار ساعت: سبز = سالم | نارنجی = فقط اینترنت قطع | قرمز = قطع کامل
-//    6) حذف کامل برنامه (Uninstall) از منوی آیکون: پاک کردن استارتآپ،
+//    6) پنجره «لاگ زنده»: نمایش لحظه‌ای اقدامات، نتایج و دستورات در حال اجرا
+//    7) حذف کامل برنامه (Uninstall) از منوی آیکون: پاک کردن استارتآپ،
 //       بستن برنامه، حذف EXE و در صورت درخواست، پاک کردن تنظیمات و لاگ
 // ============================================================================
 
@@ -22,6 +24,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Management;
 using System.Net.NetworkInformation;
@@ -41,7 +44,7 @@ namespace NetworkWatchdog
     // ========================================================================
     internal static class AppInfo
     {
-        public const string Version = "2.1.0";
+        public const string Version = "2.2.0";
     }
 
     // ========================================================================
@@ -205,8 +208,12 @@ namespace NetworkWatchdog
             if (maxKb > 0) _maxKb = maxKb;
         }
 
+        // رخداد «خط ثبت‌شده» - پنجره لاگ زنده برای به‌روزرسانی لحظه‌ای مشترک می‌شود
+        public static event Action<string> LineLogged;
+
         public static void Write(string level, string msg)
         {
+            string line = null;
             lock (SyncRoot)
             {
                 try
@@ -224,10 +231,47 @@ namespace NetworkWatchdog
                         }
                     }
                     catch { }
-                    string line = string.Format("[{0}] [{1}] {2}\r\n",
+                    line = string.Format("[{0}] [{1}] {2}",
                         DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), level, msg);
-                    File.AppendAllText(_path, line, Encoding.UTF8);
+                    File.AppendAllText(_path, line + "\r\n", Encoding.UTF8);
                 }
+                catch { }
+            }
+            // اطلاع‌رسانی به مشترکان (پنجره لاگ زنده) خارج از قفل فایل
+            if (line != null)
+            {
+                Action<string> handler = LineLogged;
+                if (handler != null)
+                {
+                    try { handler(line); }
+                    catch { }
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    //  فعالیت جاری برنامه - در نوار وضعیت پنجره لاگ زنده نمایش داده می‌شود
+    //  (مثلاً: «در حال بررسی اتصال»، «ری‌استارت آداپتور Ethernet»، ...)
+    // ========================================================================
+    public static class Activity
+    {
+        static string _current = "";
+
+        public static string Current
+        {
+            get { return _current; }
+        }
+
+        public static event Action<string> Changed;
+
+        public static void Set(string text)
+        {
+            _current = text == null ? "" : text;
+            Action<string> handler = Changed;
+            if (handler != null)
+            {
+                try { handler(_current); }
                 catch { }
             }
         }
@@ -264,11 +308,18 @@ namespace NetworkWatchdog
                 using (Ping p = new Ping())
                 {
                     PingReply r = p.Send(host, timeout);
-                    return r.Status == IPStatus.Success;
+                    if (r.Status == IPStatus.Success)
+                    {
+                        Logger.Write("DEBUG", "   Ping " + host + " -> پاسخ در " + r.RoundtripTime + "ms");
+                        return true;
+                    }
+                    Logger.Write("DEBUG", "   Ping " + host + " -> " + r.Status);
+                    return false;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.Write("DEBUG", "   Ping " + host + " -> خطا: " + ex.GetType().Name);
                 return false;
             }
         }
@@ -283,20 +334,24 @@ namespace NetworkWatchdog
                 IAsyncResult ar = tc.BeginConnect(host, port, null, null);
                 if (!ar.AsyncWaitHandle.WaitOne(timeout, false))
                 {
+                    Logger.Write("DEBUG", "   TCP " + host + ":" + port + " -> مهلت تمام شد");
                     return false;
                 }
                 try
                 {
                     tc.EndConnect(ar);
+                    Logger.Write("DEBUG", "   TCP " + host + ":" + port + " -> اتصال برقرار شد");
                     return true;
                 }
                 catch
                 {
+                    Logger.Write("DEBUG", "   TCP " + host + ":" + port + " -> اتصال رد شد");
                     return false;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.Write("DEBUG", "   TCP " + host + ":" + port + " -> خطا: " + ex.GetType().Name);
                 return false;
             }
             finally
@@ -310,89 +365,276 @@ namespace NetworkWatchdog
     }
 
     // ========================================================================
-    //  مدیریت آداپتورهای شبکه با WMI - سازگار با Windows 7/10/11
-    //  (cmdlet های PowerShell مثل Get-NetAdapter در ویندوز 7 وجود ندارند،
-    //   اما WMI از ویندوز ویستا به بعد یکسان و پایدار است)
+    //  مدیریت آداپتورهای شبکه - منطق ادغام‌شده از اسکریپت پایتون
+    //  RestartNetworkAdaptors.py کاربر:
+    //
+    //    کشف آداپتورها (مثل پایتون، از دو منبع):
+    //      WMI   → همه آداپتورهای دارای «نام اتصال» (فعال و غیرفعال)
+    //      netsh → خروجی «netsh interface show interface» (شامل غیرفعال‌ها؛
+    //              اگر آداپتوری در ری‌استارت قبلی غیرفعال مانده باشد،
+    //              دوباره فعال می‌شود - خودترمیم)
+    //
+    //    ری‌استارت (ترتیب دقیقاً مثل پایتون):
+    //      1) netsh disable -> تاخیر -> netsh enable -> تایید وضعیت (اصلی)
+    //      2) WMI Win32_NetworkAdapter.Disable/Enable (جایگزین)
+    //      3) PowerShell Restart-NetAdapter (آخرین - ویندوز 8+)
+    //
+    //    تفاوت مهم با نسخه قبلی این برنامه: قبلاً WMI روش اصلی بود که
+    //    روی بسیاری از سیستم‌ها کد موفق برمی‌گرداند ولی عملاً کاری انجام
+    //    نمی‌دهد؛ اکنون netsh (روش اثبات‌شده اسکریپت پایتون) روش اصلی است
+    //    و بعد از هر ری‌استارت، وضعیت واقعی آداپتور تایید می‌شود.
+    //    همه دستورات و خروجی‌ها در لاگ (و پنجره لاگ زنده) ثبت می‌شوند.
     // ========================================================================
     public static class AdapterManager
     {
         public class AdapterInfo
         {
-            public string Name;
-            public string Description;
-            public string ConnectionId;
-            public string DeviceId;
+            public string Name;         // نام دستگاه (WMI Name)
+            public string Description;  // توضیح/درایور آداپتور
+            public string ConnectionId; // نام اتصال (همان نام در netsh و ncpa.cpl)
+            public string DeviceId;     // شماره WMI DeviceID (برای روش جایگزین WMI)
+            public bool Enabled;        // وضعیت فعلی آداپتور
         }
 
-        // آداپتورهای فعال و فیزیکی را برمی‌گرداند (مجازی‌ها با Regex حذف می‌شوند)
-        public static List<AdapterInfo> GetEnabledPhysicalAdapters(string excludePattern)
+        public class CmdResult
         {
-            List<AdapterInfo> list = new List<AdapterInfo>();
-            Regex rx = null;
+            public int ExitCode = -1;
+            public string Output = "";
+        }
+
+        // ------------------------------------------------------------------
+        //  کشف اهداف ری‌استارت (ترکیب WMI + netsh - مطابق اسکریپت پایتون)
+        // ------------------------------------------------------------------
+        public static List<AdapterInfo> GetResetTargets(string excludePattern)
+        {
+            Dictionary<string, AdapterInfo> map =
+                new Dictionary<string, AdapterInfo>(StringComparer.OrdinalIgnoreCase);
+            Regex rx = BuildExcludeRegex(excludePattern);
+
+            // ---- منبع 1: WMI (یونیکد و مستقل از زبان ویندوز) ----
             try
             {
-                rx = new Regex(excludePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            }
-            catch
-            {
-                rx = new Regex("Virtual|Loopback|Tunnel", RegexOptions.IgnoreCase);
-            }
-            using (ManagementObjectSearcher searcher =
-                new ManagementObjectSearcher("SELECT * FROM Win32_NetworkAdapter WHERE NetEnabled=TRUE"))
-            {
-                foreach (ManagementObject mo in searcher.Get())
+                int wmiCount = 0;
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL"))
                 {
-                    string name = Convert.ToString(mo["Name"]);
-                    string desc = Convert.ToString(mo["Description"]);
-                    string connId = Convert.ToString(mo["NetConnectionID"]);
-                    string devId = Convert.ToString(mo["DeviceID"]);
-                    if (connId == null || connId.Length == 0) continue;      // آداپتور قابل اتصال نیست
-                    if (rx.IsMatch(name) || rx.IsMatch(desc)) continue;      // آداپتور مجازی
-                    AdapterInfo ai = new AdapterInfo();
-                    ai.Name = name;
-                    ai.Description = desc;
-                    ai.ConnectionId = connId;
-                    ai.DeviceId = devId;
-                    list.Add(ai);
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        string name = Convert.ToString(mo["Name"]);
+                        string desc = Convert.ToString(mo["Description"]);
+                        string connId = Convert.ToString(mo["NetConnectionID"]);
+                        string devId = Convert.ToString(mo["DeviceID"]);
+                        if (connId == null || connId.Length == 0) continue;
+                        if (rx.IsMatch(name) || rx.IsMatch(desc) || rx.IsMatch(connId)) continue;
+                        bool enabled = false;
+                        try { enabled = Convert.ToBoolean(mo["NetEnabled"]); }
+                        catch { }
+                        wmiCount++;
+                        AdapterInfo ai;
+                        if (map.TryGetValue(connId, out ai))
+                        {
+                            ai.Enabled = ai.Enabled || enabled;
+                            if (ai.DeviceId.Length == 0) ai.DeviceId = devId;
+                        }
+                        else
+                        {
+                            ai = new AdapterInfo();
+                            ai.Name = name;
+                            ai.Description = desc;
+                            ai.ConnectionId = connId;
+                            ai.DeviceId = devId;
+                            ai.Enabled = enabled;
+                            map[connId] = ai;
+                        }
+                    }
                 }
+                Logger.Write("DEBUG", "منبع WMI: " + wmiCount + " آداپتور (پس از حذف مجازی‌ها) یافت شد.");
             }
-            return list;
+            catch (Exception ex)
+            {
+                Logger.Write("WARN", "کشف آداپتور از WMI ناموفق: " + ex.Message);
+            }
+
+            // ---- منبع 2: netsh (مثل اسکریپت پایتون - شامل غیرفعال‌ها) ----
+            try
+            {
+                List<string> netshNames = ParseNetshInterfaceList();
+                int newCount = 0;
+                foreach (string nm in netshNames)
+                {
+                    if (nm == null || nm.Length == 0) continue;
+                    if (rx.IsMatch(nm)) continue;
+                    if (!map.ContainsKey(nm))
+                    {
+                        AdapterInfo ai = new AdapterInfo();
+                        ai.Name = nm;
+                        ai.Description = "";
+                        ai.ConnectionId = nm;
+                        ai.DeviceId = "";
+                        ai.Enabled = false;   // وضعیت از netsh معلوم نیست
+                        map[nm] = ai;
+                        newCount++;
+                    }
+                }
+                Logger.Write("DEBUG", "منبع netsh: " + netshNames.Count + " نام اینترفیس خوانده شد (" +
+                    newCount + " مورد جدید).");
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("WARN", "کشف آداپتور از netsh ناموفق: " + ex.Message);
+            }
+
+            return new List<AdapterInfo>(map.Values);
         }
 
-        // ری‌استارت یک آداپتور: WMI با fallback به netsh
+        // ------------------------------------------------------------------
+        //  ری‌استارت یک آداپتور - دقیقاً مطابق اسکریپت پایتون:
+        //    1) netsh disable -> تاخیر -> netsh enable -> تایید وضعیت
+        //    2) در صورت شکست: WMI Disable/Enable
+        //    3) در صورت شکست: PowerShell Restart-NetAdapter (ویندوز 8+)
+        //  همه دستورات اجراشده با کد خروج و خروجی متنی در لاگ ثبت می‌شوند
+        // ------------------------------------------------------------------
         public static bool RestartAdapter(AdapterInfo a, AppSettings s)
         {
-            // ---- روش 1: WMI (ترجیحی) ----
+            int delaySec = Math.Max(1, s.RestartDelaySeconds);
+            string okMethod = "";
+
+            // ---------- روش 1: netsh (اصلی - مطابق اسکریپت پایتون) ----------
             try
             {
-                bool okDisable = InvokeWmi(a.DeviceId, "Disable");
-                Logger.Write("DEBUG", "  Disable (WMI): " + (okDisable ? "OK" : "NOT-OK") + " - " + a.Name);
-                Thread.Sleep(Math.Max(1, s.RestartDelaySeconds) * 1000);
-                bool okEnable = InvokeWmi(a.DeviceId, "Enable");
-                Logger.Write("DEBUG", "  Enable  (WMI): " + (okEnable ? "OK" : "NOT-OK") + " - " + a.Name);
-                if (okEnable) return true;
+                Logger.Write("INFO", "-> روش 1 (netsh): غیرفعال‌سازی آداپتور...");
+                CmdResult r1 = RunNetsh(a.ConnectionId, "disable");
+                LogCmdResult("netsh disable", r1);
+
+                Logger.Write("INFO", "-> انتظار " + delaySec + " ثانیه (آداپتور خاموش است)...");
+                Thread.Sleep(delaySec * 1000);
+
+                Logger.Write("INFO", "-> روش 1 (netsh): فعال‌سازی آداپتور...");
+                CmdResult r2 = RunNetsh(a.ConnectionId, "enable");
+                LogCmdResult("netsh enable", r2);
+
+                Logger.Write("INFO", "-> انتظار 3 ثانیه برای بالا آمدن آداپتور...");
+                Thread.Sleep(3000);
+
+                if (VerifyEnabled(a, "netsh")) okMethod = "netsh";
+                else Logger.Write("WARN", "-> روش netsh موفق نبود؛ روش جایگزین امتحان می‌شود.");
             }
             catch (Exception ex)
             {
-                Logger.Write("WARN", "  WMI ناموفق: " + ex.Message);
+                Logger.Write("WARN", "-> خطا در روش netsh: " + ex.Message);
             }
-            // ---- روش 2: netsh (جایگزین) ----
-            try
+
+            // ---------- روش 2: WMI Win32_NetworkAdapter (جایگزین) ----------
+            if (okMethod.Length == 0 && a.DeviceId.Length > 0)
             {
-                RunNetsh(a.ConnectionId, "disable");
-                Thread.Sleep(Math.Max(1, s.RestartDelaySeconds) * 1000);
-                RunNetsh(a.ConnectionId, "enable");
-                Logger.Write("DEBUG", "  netsh fallback اجرا شد - " + a.Name);
+                try
+                {
+                    Logger.Write("INFO", "-> روش 2 (WMI): فراخوانی Win32_NetworkAdapter.Disable ...");
+                    uint d = InvokeWmi(a.DeviceId, "Disable");
+                    Logger.Write("INFO", "   نتیجه Disable: " + WmiResultText(d));
+                    Thread.Sleep(delaySec * 1000);
+                    Logger.Write("INFO", "-> روش 2 (WMI): فراخوانی Win32_NetworkAdapter.Enable ...");
+                    uint e = InvokeWmi(a.DeviceId, "Enable");
+                    Logger.Write("INFO", "   نتیجه Enable: " + WmiResultText(e));
+                    Thread.Sleep(3000);
+                    if (VerifyEnabled(a, "WMI")) okMethod = "WMI";
+                    else Logger.Write("WARN", "-> روش WMI موفق نبود؛ روش بعدی امتحان می‌شود.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Write("WARN", "-> خطا در روش WMI: " + ex.Message);
+                }
+            }
+
+            // ---------- روش 3: PowerShell Restart-NetAdapter (ویندوز 8+) ----------
+            if (okMethod.Length == 0)
+            {
+                try
+                {
+                    Logger.Write("INFO", "-> روش 3 (PowerShell): Restart-NetAdapter (فقط ویندوز 8 به بعد)...");
+                    string psCmd = "Restart-NetAdapter -Name '" + a.ConnectionId.Replace("'", "''") +
+                        "' -Confirm:$false";
+                    Logger.Write("INFO", "اجرای دستور: powershell -NoProfile -Command \"" + psCmd + "\"");
+                    CmdResult rp = RunCapture("powershell",
+                        "-NoProfile -ExecutionPolicy Bypass -Command \"" + psCmd + "\"", 90000);
+                    LogCmdResult("PowerShell Restart-NetAdapter", rp);
+                    Thread.Sleep(3000);
+                    if (VerifyEnabled(a, "PowerShell")) okMethod = "PowerShell";
+                }
+                catch (Exception ex)
+                {
+                    Logger.Write("WARN", "-> خطا در روش PowerShell: " + ex.Message);
+                }
+            }
+
+            if (okMethod.Length > 0)
+            {
+                Logger.Write("INFO", "آداپتور \"" + a.ConnectionId + "\" با موفقیت ری‌استارت شد (روش: " +
+                    okMethod + ").");
                 return true;
             }
-            catch (Exception ex)
-            {
-                Logger.Write("WARN", "  netsh ناموفق: " + ex.Message);
-                return false;
-            }
+            Logger.Write("ERROR", "ری‌استارت آداپتور \"" + a.ConnectionId + "\" با هیچ روشی موفق نشد!");
+            return false;
         }
 
-        static bool InvokeWmi(string deviceId, string method)
+        // ------------------------------------------------------------------
+        //  تایید فعال بودن آداپتور پس از ری‌استارت
+        //  (WMI = معتبرترین و مستقل از زبان ویندوز / متن netsh = کلیدواژه انگلیسی)
+        // ------------------------------------------------------------------
+        static bool VerifyEnabled(AdapterInfo a, string source)
+        {
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT DeviceID, NetConnectionID, NetEnabled FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        string devId = Convert.ToString(mo["DeviceID"]);
+                        string connId = Convert.ToString(mo["NetConnectionID"]);
+                        bool match = false;
+                        if (a.DeviceId.Length > 0 && devId == a.DeviceId) match = true;
+                        else if (string.Compare(connId, a.ConnectionId, StringComparison.OrdinalIgnoreCase) == 0)
+                            match = true;
+                        if (!match) continue;
+                        bool enabled = false;
+                        try { enabled = Convert.ToBoolean(mo["NetEnabled"]); }
+                        catch { }
+                        if (enabled)
+                        {
+                            Logger.Write("INFO", "   تایید وضعیت (" + source + "): آداپتور \"" +
+                                a.ConnectionId + "\" فعال است (WMI: NetEnabled=TRUE).");
+                            return true;
+                        }
+                        Logger.Write("DEBUG", "   وضعیت فعلی (WMI): غیرفعال - تایید نشد.");
+                        return false;   // آداپتور پیداست ولی هنوز غیرفعال است
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("DEBUG", "   تایید با WMI ناموفق: " + ex.Message);
+            }
+            // منبع دوم: متن خروجی netsh (مثل اسکریپت پایتون - کلیدواژه انگلیسی)
+            try
+            {
+                Logger.Write("INFO", "اجرای دستور: netsh interface show interface name=\"" +
+                    a.ConnectionId + "\"");
+                CmdResult r = RunCapture("netsh",
+                    "interface show interface name=\"" + a.ConnectionId + "\"", 15000);
+                Logger.Write("DEBUG", "   خروجی کامل: " + Flatten(r.Output));
+                if (r.Output != null && (r.Output.Contains("Connected") || r.Output.Contains("Enabled")))
+                {
+                    Logger.Write("INFO", "   تایید وضعیت (" + source +
+                        "): متن netsh حاوی Connected/Enabled است.");
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        static uint InvokeWmi(string deviceId, string method)
         {
             using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
                 "SELECT * FROM Win32_NetworkAdapter WHERE DeviceID='" + deviceId + "'"))
@@ -400,25 +642,123 @@ namespace NetworkWatchdog
                 foreach (ManagementObject mo in searcher.Get())
                 {
                     object result = mo.InvokeMethod(method, null);
-                    if (result == null) return true;
-                    return Convert.ToUInt32(result) == 0;
+                    if (result == null) return 0;
+                    return Convert.ToUInt32(result);
                 }
             }
-            return false;
+            return 4294967295;   // آداپتور یافت نشد
         }
 
-        static void RunNetsh(string connectionId, string action)
+        static string WmiResultText(uint code)
         {
-            ProcessStartInfo psi = new ProcessStartInfo(
-                "netsh", string.Format("interface set interface name=\"{0}\" admin={1}", connectionId, action));
-            psi.CreateNoWindow = true;
-            psi.UseShellExecute = false;
-            psi.RedirectStandardOutput = true;
-            psi.RedirectStandardError = true;
-            using (Process p = Process.Start(psi))
+            if (code == 0) return "موفق (کد 0)";
+            if (code == 2) return "دسترسی رد شد (کد 2)";
+            return "کد " + code;
+        }
+
+        static Regex BuildExcludeRegex(string excludePattern)
+        {
+            try
             {
-                p.WaitForExit(30000);
+                return new Regex(excludePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
             }
+            catch
+            {
+                return new Regex("Virtual|Loopback|Tunnel", RegexOptions.IgnoreCase);
+            }
+        }
+
+        static CmdResult RunNetsh(string connectionId, string action)
+        {
+            Logger.Write("INFO", "اجرای دستور: netsh interface set interface name=\"" +
+                connectionId + "\" admin=" + action);
+            return RunCapture("netsh", string.Format(
+                "interface set interface name=\"{0}\" admin={1}", connectionId, action), 30000);
+        }
+
+        // اجرای یک برنامه و گرفتن کد خروج + متن خروجی (برای ثبت دقیق در لاگ)
+        static CmdResult RunCapture(string exe, string args, int timeoutMs)
+        {
+            CmdResult r = new CmdResult();
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe, args);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                try
+                {
+                    // خروجی برنامه‌های کنسول (netsh/powershell) با کدپیج OEM نوشته می‌شود
+                    psi.StandardOutputEncoding =
+                        Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage);
+                    psi.StandardErrorEncoding = psi.StandardOutputEncoding;
+                }
+                catch { }
+                using (Process p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    string error = p.StandardError.ReadToEnd();
+                    if (!p.WaitForExit(timeoutMs))
+                    {
+                        try { p.Kill(); }
+                        catch { }
+                    }
+                    r.Output = output == null ? "" : output;
+                    if (error != null && error.Trim().Length > 0)
+                        r.Output = r.Output + "[STDERR] " + error;
+                    r.ExitCode = p.HasExited ? p.ExitCode : -1;
+                }
+            }
+            catch (Exception ex)
+            {
+                r.Output = "خطا در اجرا: " + ex.Message;
+                r.ExitCode = -1;
+            }
+            return r;
+        }
+
+        // خلاصه‌سازی نتیجه یک دستور برای لاگ
+        static void LogCmdResult(string title, CmdResult r)
+        {
+            string text = Flatten(r.Output);
+            if (text.Length == 0)
+                Logger.Write("INFO", "   کد خروج " + title + ": " + r.ExitCode + " (بدون خروجی متنی)");
+            else
+                Logger.Write("INFO", "   کد خروج " + title + ": " + r.ExitCode + " | خروجی: " + text);
+        }
+
+        static string Flatten(string s)
+        {
+            if (s == null) return "";
+            string t = s.Trim();
+            if (t.Length > 400) t = t.Substring(0, 400) + " ...";
+            return t.Replace("\r\n", " | ").Replace("\n", " | ");
+        }
+
+        // خواندن لیست همه اینترفیس‌ها از netsh (شامل غیرفعال‌ها - مثل اسکریپت پایتون)
+        static List<string> ParseNetshInterfaceList()
+        {
+            List<string> names = new List<string>();
+            Logger.Write("INFO", "اجرای دستور: netsh interface show interface");
+            CmdResult r = RunCapture("netsh", "interface show interface", 15000);
+            LogCmdResult("netsh show interface", r);
+            if (r.Output == null) return names;
+            string[] lines = r.Output.Replace("\r\n", "\n").Split('\n');
+            bool headerSkipped = false;
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                if (line.StartsWith("-")) continue;                    // خط جداکننده
+                if (!headerSkipped) { headerSkipped = true; continue; }  // سرستون (هر زبان)
+                string[] parts = line.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 4) continue;
+                // ستون‌ها: AdminState  State  Type  Name...  → نام = بقیه خط
+                string name = string.Join(" ", parts, 3, parts.Length - 3);
+                if (name.Length > 0) names.Add(name);
+            }
+            return names;
         }
     }
 
@@ -784,6 +1124,431 @@ namespace NetworkWatchdog
     }
 
     // ========================================================================
+    //  پنجره لاگ زنده - نمایش لحظه‌ای اقدامات، نتایج و دستورات در حال اجرا
+    //  هر چیزی که در فایل watchdog.log ثبت می‌شود، همین‌جا به‌صورت زنده
+    //  (با رنگ‌بندی سطح پیام) دیده می‌شود؛ علاوه بر آن تاریخچه ابتدای
+    //  فایل لاگ هم هنگام باز شدن بارگذاری می‌شود.
+    //  نوار وضعیت پایین، «فعالیت جاری» برنامه را نشان می‌دهد.
+    // ========================================================================
+    public class LogForm : Form
+    {
+        const int MaxLines = 3000;   // حداکثر خطوط نگهداری‌شده در حافظه
+        const int TrimChunk = 500;   // مقدار حذف از ابتدای لیست هنگام سرریز
+
+        readonly object _sync = new object();
+        readonly List<string> _all = new List<string>(1024);
+        readonly Queue<string> _pending = new Queue<string>();
+
+        RichTextBox _txt;
+        ComboBox _cmbLevel;
+        CheckBox _chkAutoScroll;
+        Button _btnPause;
+        Button _btnClear;
+        Button _btnCopy;
+        Button _btnSave;
+        Button _btnOpenFile;
+        StatusStrip _status;
+        ToolStripStatusLabel _lblActivity;
+        ToolStripStatusLabel _lblCount;
+        ToolStripStatusLabel _lblFile;
+        Icon _ownIcon;
+
+        bool _paused;
+        bool _needFullRender;
+        int _level;   // 0 = همه | 1 = اطلاعات و مهم‌تر | 2 = هشدار و مهم‌تر
+
+        [DllImport("user32.dll")]
+        static extern IntPtr SendMessageNative(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        const int WM_SETREDRAW = 11;
+
+        public LogForm()
+        {
+            BuildUi();
+            // مشترک شدن در رخدادهای لاگ و فعالیت (لغو اشتراک در OnFormClosed)
+            Logger.LineLogged += OnLineLogged;
+            Activity.Changed += OnActivityChanged;
+        }
+
+        void BuildUi()
+        {
+            this.Text = "لاگ زنده - Network Watchdog " + AppInfo.Version;
+            this.Font = new Font("Segoe UI", 9F);
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.ClientSize = new Size(860, 540);
+            this.MinimumSize = new Size(840, 380);
+            this.RightToLeft = RightToLeft.Yes;
+            this.RightToLeftLayout = true;   // چیدمان فارسی (آینه‌ای)
+
+            _ownIcon = IconFactory.Make(Color.FromArgb(46, 160, 67));
+            this.Icon = _ownIcon;
+
+            _txt = new RichTextBox();
+            _txt.ReadOnly = true;
+            _txt.WordWrap = false;
+            _txt.DetectUrls = false;
+            _txt.Font = new Font("Consolas", 9F);
+            _txt.RightToLeft = RightToLeft.No;   // متن لاگ (دستورات) چپ‌به‌راست
+            _txt.BorderStyle = BorderStyle.Fixed3D;
+            _txt.BackColor = Color.White;
+
+            _cmbLevel = new ComboBox();
+            _cmbLevel.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbLevel.Items.Add("نمایش همه پیام‌ها");
+            _cmbLevel.Items.Add("فقط اطلاعات و مهم‌تر");
+            _cmbLevel.Items.Add("فقط هشدار و خطاها");
+            _cmbLevel.SelectedIndex = 0;
+            _cmbLevel.SetBounds(10, 9, 140, 23);
+            _cmbLevel.SelectedIndexChanged += new EventHandler(OnLevelChanged);
+
+            _chkAutoScroll = new CheckBox();
+            _chkAutoScroll.Text = "اسکرول خودکار";
+            _chkAutoScroll.AutoSize = true;
+            _chkAutoScroll.SetBounds(158, 11, 105, 22);
+            _chkAutoScroll.Checked = true;
+
+            _btnPause = new Button();
+            _btnPause.Text = "توقف نمایش";
+            _btnPause.SetBounds(268, 7, 95, 28);
+            _btnPause.Click += new EventHandler(OnPauseToggle);
+
+            _btnCopy = new Button();
+            _btnCopy.Text = "کپی همه";
+            _btnCopy.SetBounds(370, 7, 75, 28);
+            _btnCopy.Click += new EventHandler(OnCopyAll);
+
+            _btnSave = new Button();
+            _btnSave.Text = "ذخیره در فایل";
+            _btnSave.SetBounds(452, 7, 100, 28);
+            _btnSave.Click += new EventHandler(OnSaveToFile);
+
+            _btnClear = new Button();
+            _btnClear.Text = "پاک کردن نمایش";
+            _btnClear.SetBounds(559, 7, 110, 28);
+            _btnClear.Click += new EventHandler(OnClearView);
+
+            _btnOpenFile = new Button();
+            _btnOpenFile.Text = "باز کردن فایل لاگ";
+            _btnOpenFile.SetBounds(676, 7, 120, 28);
+            _btnOpenFile.Click += new EventHandler(OnOpenLogFile);
+
+            _lblActivity = new ToolStripStatusLabel();
+            _lblActivity.Spring = true;
+            _lblActivity.Text = "فعالیت فعلی: -";
+            _lblActivity.TextAlign = ContentAlignment.MiddleRight;
+
+            _lblCount = new ToolStripStatusLabel();
+            _lblCount.Text = "0 خط";
+
+            _lblFile = new ToolStripStatusLabel();
+            _lblFile.Text = "فایل: " + Path.GetFileName(Logger.FilePath);
+
+            _status = new StatusStrip();
+            _status.Items.Add(_lblActivity);
+            _status.Items.Add(_lblCount);
+            _status.Items.Add(_lblFile);
+
+            this.Controls.Add(_txt);
+            this.Controls.Add(_status);
+            this.Controls.Add(_cmbLevel);
+            this.Controls.Add(_chkAutoScroll);
+            this.Controls.Add(_btnPause);
+            this.Controls.Add(_btnCopy);
+            this.Controls.Add(_btnSave);
+            this.Controls.Add(_btnClear);
+            this.Controls.Add(_btnOpenFile);
+            LayoutManual();
+        }
+
+        void LayoutManual()
+        {
+            int w = this.ClientSize.Width;
+            int h = this.ClientSize.Height;
+            int statusH = 28;
+            _txt.SetBounds(0, 44, w, Math.Max(80, h - 44 - statusH));
+            _status.SetBounds(0, h - statusH, w, statusH);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            try { LayoutManual(); }
+            catch { }
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            LoadTail();                       // تاریخچه ابتدای فایل لاگ
+            FlushNow();                       // خطوط در صف مانده (قبل از باز شدن پنجره)
+            UpdateActivityText(Activity.Current);
+        }
+
+        // ------------------------------------------------------------------
+        //  دریافت خطوط جدید (از هر تردی) و انتقال امن به رابط کاربری
+        // ------------------------------------------------------------------
+        void OnLineLogged(string line)
+        {
+            lock (_sync) { _pending.Enqueue(line); }
+            QueueFlush();
+        }
+
+        void OnActivityChanged(string text)
+        {
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                BeginInvoke((MethodInvoker)delegate { UpdateActivityText(text); });
+            }
+            catch { }
+        }
+
+        void UpdateActivityText(string text)
+        {
+            _lblActivity.Text = "فعالیت فعلی: " + (string.IsNullOrEmpty(text) ? "-" : text);
+        }
+
+        void QueueFlush()
+        {
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                BeginInvoke((MethodInvoker)delegate { FlushNow(); });
+            }
+            catch { }
+        }
+
+        void FlushNow()
+        {
+            if (IsDisposed) return;
+            Queue<string> batch = null;
+            lock (_sync)
+            {
+                if (_pending.Count > 0)
+                {
+                    batch = new Queue<string>(_pending);
+                    _pending.Clear();
+                }
+            }
+            if (batch != null)
+            {
+                foreach (string line in batch) _all.Add(line);
+                while (_all.Count > MaxLines)
+                {
+                    _all.RemoveRange(0, Math.Min(TrimChunk, _all.Count));
+                    _needFullRender = true;
+                }
+            }
+            if (_needFullRender)
+            {
+                RenderAll();
+                return;
+            }
+            if (batch != null && !_paused)
+            {
+                foreach (string line in batch)
+                {
+                    if (MatchesFilter(line)) AppendColored(line);
+                }
+                if (_chkAutoScroll.Checked) ScrollEnd();
+            }
+            UpdateCount();
+        }
+
+        // بازسازی کامل متن نمایش (تغییر فیلتر / رفع توقف / سرریز حافظه)
+        void RenderAll()
+        {
+            _needFullRender = false;
+            try
+            {
+                SendMessageNative(_txt.Handle, WM_SETREDRAW, (IntPtr)0, IntPtr.Zero);
+                _txt.Clear();
+                foreach (string line in _all)
+                {
+                    if (MatchesFilter(line)) AppendColored(line);
+                }
+                SendMessageNative(_txt.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                _txt.Invalidate();
+            }
+            catch
+            {
+                try { SendMessageNative(_txt.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero); }
+                catch { }
+            }
+            if (_chkAutoScroll.Checked) ScrollEnd();
+            UpdateCount();
+        }
+
+        void AppendColored(string line)
+        {
+            _txt.SelectionStart = _txt.TextLength;
+            _txt.SelectionLength = 0;
+            _txt.SelectionColor = ColorForLine(line);
+            _txt.AppendText(line + "\n");
+        }
+
+        static int LevelOf(string line)
+        {
+            if (line.Contains("[DEBUG]")) return 0;
+            if (line.Contains("[INFO]")) return 1;
+            if (line.Contains("[WARN]")) return 2;
+            if (line.Contains("[ERROR]")) return 3;
+            return 1;
+        }
+
+        bool MatchesFilter(string line)
+        {
+            if (_level == 0) return true;
+            return LevelOf(line) >= _level;
+        }
+
+        static Color ColorForLine(string line)
+        {
+            int lv = LevelOf(line);
+            if (lv == 3) return Color.FromArgb(196, 43, 28);     // خطا: قرمز
+            if (lv == 2) return Color.FromArgb(156, 106, 12);    // هشدار: کهربایی
+            if (lv == 0) return Color.FromArgb(120, 120, 120);   // ریزه‌کاری: خاکستری
+            return Color.FromArgb(32, 32, 32);                   // اطلاعات: مشکی
+        }
+
+        void ScrollEnd()
+        {
+            try
+            {
+                _txt.SelectionStart = _txt.TextLength;
+                _txt.SelectionLength = 0;
+                _txt.ScrollToCaret();
+            }
+            catch { }
+        }
+
+        void UpdateCount()
+        {
+            _lblCount.Text = _all.Count + " خط";
+        }
+
+        // خواندن انتهای فایل لاگ برای نمایش تاریخچه قبل از باز شدن پنجره
+        void LoadTail()
+        {
+            try
+            {
+                if (!File.Exists(Logger.FilePath)) return;
+                using (FileStream fs = new FileStream(Logger.FilePath,
+                    FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    if (fs.Length > 200 * 1024)
+                        fs.Seek(-200 * 1024, SeekOrigin.End);
+                    else
+                        fs.Seek(0, SeekOrigin.Begin);
+                    using (StreamReader sr = new StreamReader(fs, Encoding.UTF8))
+                    {
+                        string tail = sr.ReadToEnd();
+                        string[] lines = tail.Replace("\r\n", "\n").Split('\n');
+                        for (int i = 0; i < lines.Length; i++)
+                        {
+                            string t = lines[i].TrimEnd();
+                            if (t.Length == 0) continue;
+                            if (i == 0 && !t.StartsWith("[")) continue;   // نیمه‌خط ابتدای فایل
+                            _all.Add(t);
+                        }
+                    }
+                }
+                while (_all.Count > MaxLines) _all.RemoveRange(0, TrimChunk);
+            }
+            catch { }
+            RenderAll();
+        }
+
+        // ------------------------------------------------------------------
+        //  رویدادهای دکمه‌ها
+        // ------------------------------------------------------------------
+        void OnPauseToggle(object sender, EventArgs e)
+        {
+            _paused = !_paused;
+            _btnPause.Text = _paused ? "ادامه نمایش" : "توقف نمایش";
+            if (!_paused) RenderAll();
+        }
+
+        void OnLevelChanged(object sender, EventArgs e)
+        {
+            _level = _cmbLevel.SelectedIndex;
+            if (_level < 0) _level = 0;
+            if (IsHandleCreated) RenderAll();   // قبل از ساخته شدن پنجره نیازی به بازسازی نیست
+        }
+
+        void OnClearView(object sender, EventArgs e)
+        {
+            _txt.Clear();
+            lock (_sync) { _pending.Clear(); }
+            _all.Clear();
+            UpdateCount();
+        }
+
+        void OnCopyAll(object sender, EventArgs e)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (string line in _all)
+                {
+                    if (MatchesFilter(line)) sb.AppendLine(line);
+                }
+                if (sb.Length == 0) return;
+                Clipboard.SetText(sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("خطا در کپی: " + ex.Message, "خطا",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        void OnSaveToFile(object sender, EventArgs e)
+        {
+            try
+            {
+                using (SaveFileDialog dlg = new SaveFileDialog())
+                {
+                    dlg.Title = "ذخیره لاگ";
+                    dlg.FileName = "watchdog-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".txt";
+                    dlg.Filter = "فایل متنی (*.txt)|*.txt|همه فایل‌ها (*.*)|*.*";
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                    StringBuilder sb = new StringBuilder();
+                    foreach (string line in _all)
+                    {
+                        if (MatchesFilter(line)) sb.AppendLine(line);
+                    }
+                    File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("خطا در ذخیره: " + ex.Message, "خطا",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        void OnOpenLogFile(object sender, EventArgs e)
+        {
+            try { Process.Start("notepad.exe", Logger.FilePath); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("خطا در باز کردن فایل: " + ex.Message, "خطا",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            // لغو اشتراک از رخدادهای استاتیک تا فرم در حافظه نماند
+            Logger.LineLogged -= OnLineLogged;
+            Activity.Changed -= OnActivityChanged;
+            try { if (_ownIcon != null) _ownIcon.Dispose(); }
+            catch { }
+            base.OnFormClosed(e);
+        }
+    }
+
+    // ========================================================================
     //  هسته برنامه: آیکون System Tray + حلقه مانیتورینگ
     // ========================================================================
     public class TrayContext : ApplicationContext
@@ -801,6 +1566,7 @@ namespace NetworkWatchdog
         Icon _iconWarn;
         Icon _iconBad;
         Icon _iconIdle;
+        LogForm _logForm;
 
         bool _lastInet = true;
         bool _lastLocal = true;
@@ -811,6 +1577,7 @@ namespace NetworkWatchdog
         ToolStripMenuItem _miCheckNow;
         ToolStripMenuItem _miRestart;
         ToolStripMenuItem _miSettings;
+        ToolStripMenuItem _miLiveLog;
         ToolStripMenuItem _miViewLog;
         ToolStripMenuItem _miOpenLogDir;
         ToolStripMenuItem _miStartup;
@@ -861,10 +1628,11 @@ namespace NetworkWatchdog
             {
                 ShowBalloon("Network Watchdog نصب شد",
                     "برنامه در پس‌زمینه فعال است و در استارتآپ ویندوز ثبت شد.\n" +
-                    "با کلیک راست روی آیکون، تنظیمات را ببینید.",
+                    "دابل‌کلیک روی آیکون: پنجره لاگ زنده | کلیک راست: تنظیمات و ابزارها",
                     ToolTipIcon.Info);
             }
 
+            Activity.Set("شروع به کار - در حال آماده‌سازی پایش شبکه...");
             _running = true;
             _worker = new Thread(new ThreadStart(Loop));
             _worker.IsBackground = true;
@@ -903,6 +1671,10 @@ namespace NetworkWatchdog
             _miSettings.Text = "تنظیمات...";
             _miSettings.Click += new EventHandler(OnSettings);
 
+            _miLiveLog = new ToolStripMenuItem();
+            _miLiveLog.Text = "پنجره لاگ زنده (فعالیت‌ها و دستورات)";
+            _miLiveLog.Click += new EventHandler(OnLiveLog);
+
             _miViewLog = new ToolStripMenuItem();
             _miViewLog.Text = "مشاهده فایل لاگ";
             _miViewLog.Click += new EventHandler(OnViewLog);
@@ -932,6 +1704,7 @@ namespace NetworkWatchdog
             _menu.Items.Add(_miRestart);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_miSettings);
+            _menu.Items.Add(_miLiveLog);
             _menu.Items.Add(_miViewLog);
             _menu.Items.Add(_miOpenLogDir);
             _menu.Items.Add(new ToolStripSeparator());
@@ -954,7 +1727,7 @@ namespace NetworkWatchdog
             _tray.Text = "Network Watchdog - در حال بررسی...";
             _tray.ContextMenuStrip = _menu;
             _tray.Visible = true;
-            _tray.DoubleClick += new EventHandler(OnSettings);
+            _tray.DoubleClick += new EventHandler(OnLiveLog);   // دوبار کلیک ← لاگ زنده
         }
 
         // --------------------------------------------------------------------
@@ -976,6 +1749,8 @@ namespace NetworkWatchdog
                 // انتظار قابل وقفه‌سازی تا دفعه بعد
                 AppSettings s = _settings;
                 int totalMs = Math.Max(10, s.CheckIntervalSeconds) * 1000;
+                Activity.Set("پایش فعال - چرخه بعدی حداکثر تا " + (totalMs / 1000) +
+                    " ثانیه دیگر (در صورت قطع، فوراً بررسی می‌شود)");
                 int slept = 0;
                 while (_running && slept < totalMs)
                 {
@@ -996,8 +1771,16 @@ namespace NetworkWatchdog
             string[] inetTargets = s.GetInternetTargets();
             string[] localTargets = s.GetLocalTargets();
 
+            Activity.Set("در حال بررسی اتصال اینترنت و شبکه محلی...");
+            Logger.Write("INFO", "==== آغاز چرخه بررسی ====");
+            Logger.Write("DEBUG", "آدرس‌های تست اینترنت: " + s.InternetTargets);
+            Logger.Write("DEBUG", "آدرس‌های تست شبکه محلی: " + s.LocalTargets);
+
             bool inet = NetCheck.AnyReachable(inetTargets, s.PingTimeoutMs, s.TcpFallbackPort);
             bool local = NetCheck.AnyReachable(localTargets, s.PingTimeoutMs, 0);
+            Logger.Write("INFO", "نتیجه بررسی: اینترنت=" + (inet ? "متصل" : "قطع") +
+                " | شبکه محلی=" + (local ? "متصل" : "قطع"));
+
             UpdateStatus(inet, local, s);
 
             // ---- حالت 1: اینترنت سالم ----
@@ -1008,10 +1791,6 @@ namespace NetworkWatchdog
                     Logger.Write("WARN",
                         "اینترنت متصل است اما شبکه محلی (دوربین‌ها) در دسترس نیست! " +
                         "برای حفظ اینترنت، ری‌استارت خودکار انجام نمی‌شود.");
-                }
-                else
-                {
-                    Logger.Write("DEBUG", "اینترنت: متصل | شبکه محلی: متصل");
                 }
                 return;
             }
@@ -1030,9 +1809,14 @@ namespace NetworkWatchdog
             RestartAllAdapters(s);
 
             // بررسی مجدد پس از ری‌استارت
+            Activity.Set("بررسی مجدد اتصال پس از ری‌استارت...");
+            Logger.Write("INFO", "انتظار " + Math.Max(1, s.AdapterUpWaitSeconds) +
+                " ثانیه برای پایدارسازی شبکه...");
             Thread.Sleep(Math.Max(1, s.AdapterUpWaitSeconds) * 1000);
             bool inet2 = NetCheck.AnyReachable(inetTargets, s.PingTimeoutMs, s.TcpFallbackPort);
             bool local2 = NetCheck.AnyReachable(localTargets, s.PingTimeoutMs, 0);
+            Logger.Write("INFO", "نتیجه بررسی پس از ری‌استارت: اینترنت=" + (inet2 ? "متصل" : "قطع") +
+                " | شبکه محلی=" + (local2 ? "متصل" : "قطع"));
             UpdateStatus(inet2, local2, s);
 
             if (inet2)
@@ -1045,6 +1829,7 @@ namespace NetworkWatchdog
 
         // --------------------------------------------------------------------
         //  ری‌استارت آداپتورها (با قفل ضدتداخل بین اجرای دستی و خودکار)
+        //  همه مراحل، دستورات و نتایج به‌صورت تفصیلی لاگ می‌شوند
         // --------------------------------------------------------------------
         public bool RestartAllAdapters(AppSettings s)
         {
@@ -1055,33 +1840,78 @@ namespace NetworkWatchdog
             }
             try
             {
+                Activity.Set("ری‌استارت آداپتورهای شبکه در حال اجراست...");
+                Logger.Write("INFO", "================= شروع فرآیند ری‌استارت شبکه =================");
+
+                if (s.ShowBalloons)
+                {
+                    try
+                    {
+                        _menu.BeginInvoke((MethodInvoker)delegate
+                        {
+                            ShowBalloon("شروع ری‌استارت شبکه",
+                                "ری‌استارت آداپتورهای شبکه آغاز شد.\n" +
+                                "برای مشاهده لحظه‌ای جزئیات، پنجره لاگ زنده را باز کنید.",
+                                ToolTipIcon.Warning);
+                        });
+                    }
+                    catch { }
+                }
+
+                Logger.Write("INFO", "مرحله 1) جستجوی آداپتورهای شبکه (WMI + netsh)...");
                 List<AdapterManager.AdapterInfo> adapters =
-                    AdapterManager.GetEnabledPhysicalAdapters(s.AdapterExcludePattern);
+                    AdapterManager.GetResetTargets(s.AdapterExcludePattern);
                 if (adapters.Count == 0)
                 {
-                    Logger.Write("WARN", "هیچ آداپتور شبکه فعال و مناسب یافت نشد.");
+                    Logger.Write("WARN", "هیچ آداپتور شبکه مناسب یافت نشد! " +
+                        "(آداپتورهای مجازی با الگوی «" + s.AdapterExcludePattern + "» حذف شدند)");
                     return false;
                 }
-                Logger.Write("INFO", string.Format(
-                    "شروع ری‌استارت {0} آداپتور شبکه...", adapters.Count));
-                int ok = 0;
-                foreach (AdapterManager.AdapterInfo a in adapters)
+
+                Logger.Write("INFO", "مرحله 2) " + adapters.Count + " آداپتور برای ری‌استارت مشخص شد:");
+                for (int i = 0; i < adapters.Count; i++)
                 {
-                    Logger.Write("INFO", "ری‌استارت: " + a.Name + " (" + a.Description + ")");
-                    for (int attempt = 1; attempt <= Math.Max(1, s.MaxRestartRetries); attempt++)
-                    {
-                        if (AdapterManager.RestartAdapter(a, s))
-                        {
-                            ok++;
-                            break;
-                        }
-                        Thread.Sleep(2000);
-                    }
-                    Thread.Sleep(Math.Max(1, s.AdapterUpWaitSeconds) * 1000);
+                    AdapterManager.AdapterInfo a = adapters[i];
+                    string state = a.Enabled
+                        ? "فعال"
+                        : (a.DeviceId.Length == 0 ? "وضعیت نامشخص" : "غیرفعال (دوباره فعال می‌شود)");
+                    Logger.Write("INFO", "   " + (i + 1) + ". «" + a.ConnectionId + "»" +
+                        (a.Description.Length > 0 ? " [" + a.Description + "]" : "") +
+                        " - " + state);
                 }
-                Logger.Write("INFO", string.Format(
-                    "ری‌استارت کامل شد: {0} از {1} آداپتور با موفقیت.", ok, adapters.Count));
-                return ok > 0;
+
+                int okCount = 0;
+                for (int i = 0; i < adapters.Count; i++)
+                {
+                    AdapterManager.AdapterInfo a = adapters[i];
+                    Activity.Set("ری‌استارت آداپتور " + (i + 1) + " از " + adapters.Count +
+                        ": «" + a.ConnectionId + "»");
+                    Logger.Write("INFO", "--------- آداپتور " + (i + 1) + " از " + adapters.Count +
+                        ": «" + a.ConnectionId + "» ---------");
+                    int retries = Math.Max(1, s.MaxRestartRetries);
+                    bool success = false;
+                    for (int attempt = 1; attempt <= retries && !success; attempt++)
+                    {
+                        if (attempt > 1)
+                        {
+                            Logger.Write("INFO", "تلاش مجدد " + attempt + " از " + retries +
+                                " برای «" + a.ConnectionId + "»...");
+                            Thread.Sleep(2000);
+                        }
+                        success = AdapterManager.RestartAdapter(a, s);
+                    }
+                    if (success) okCount++;
+                    if (i < adapters.Count - 1)
+                    {
+                        Logger.Write("INFO", "انتظار " + Math.Max(1, s.AdapterUpWaitSeconds) +
+                            " ثانیه پیش از آداپتور بعدی...");
+                        Thread.Sleep(Math.Max(1, s.AdapterUpWaitSeconds) * 1000);
+                    }
+                }
+
+                Logger.Write("INFO", "================= پایان ری‌استارت: " + okCount + " از " +
+                    adapters.Count + " آداپتور با موفقیت انجام شد =================");
+                return okCount > 0;
             }
             finally
             {
@@ -1195,6 +2025,7 @@ namespace NetworkWatchdog
                 "تمام اتصال‌های شبکه (از جمله دوربین‌ها) به‌طور موقت قطع می‌شوند.",
                 "تایید ری‌استارت", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (r != DialogResult.Yes) return;
+            ShowLogForm();   // برای دیدن لحظه‌ای مراحل، پنجره لاگ زنده باز می‌شود
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
                 try
@@ -1215,6 +2046,33 @@ namespace NetworkWatchdog
             using (SettingsForm f = new SettingsForm(this, _settings))
             {
                 f.ShowDialog(_marshal);
+            }
+        }
+
+        // --------------------------------------------------------------------
+        //  پنجره لاگ زنده
+        // --------------------------------------------------------------------
+        void OnLiveLog(object sender, EventArgs e)
+        {
+            ShowLogForm();
+        }
+
+        // باز کردن / فعال‌سازی پنجره لاگ زنده
+        void ShowLogForm()
+        {
+            try
+            {
+                if (_logForm == null || _logForm.IsDisposed)
+                {
+                    _logForm = new LogForm();
+                }
+                _logForm.Show();
+                _logForm.BringToFront();
+                _logForm.Activate();
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("WARN", "باز کردن پنجره لاگ زنده ناموفق: " + ex.Message);
             }
         }
 
@@ -1359,6 +2217,15 @@ namespace NetworkWatchdog
             catch { }
             try
             {
+                if (_logForm != null && !_logForm.IsDisposed)
+                {
+                    _logForm.Close();
+                    _logForm.Dispose();
+                }
+            }
+            catch { }
+            try
+            {
                 if (_tray != null)
                 {
                     _tray.Visible = false;
@@ -1379,6 +2246,7 @@ namespace NetworkWatchdog
                     if (_tray != null) { _tray.Visible = false; _tray.Dispose(); }
                     if (_menu != null) _menu.Dispose();
                     if (_marshal != null) _marshal.Dispose();
+                    if (_logForm != null && !_logForm.IsDisposed) _logForm.Dispose();
                     if (_iconOk != null) _iconOk.Dispose();
                     if (_iconWarn != null) _iconWarn.Dispose();
                     if (_iconBad != null) _iconBad.Dispose();
