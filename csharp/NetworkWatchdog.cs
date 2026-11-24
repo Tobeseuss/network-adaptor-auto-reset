@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 //  Network Watchdog  -  مانیتور و بازیاب خودکار اتصال اینترنت
 //  + محافظت شبکه محلی دوربین‌ها (اگر شبکه محلی سالم باشد، ری‌استارت انجام نمی‌شود)
 //
@@ -17,6 +17,10 @@
 //    6) پنجره «لاگ زنده»: نمایش لحظه‌ای اقدامات، نتایج و دستورات در حال اجرا
 //    7) حذف کامل برنامه (Uninstall) از منوی آیکون: پاک کردن استارتآپ،
 //       بستن برنامه، حذف EXE و در صورت درخواست، پاک کردن تنظیمات و لاگ
+//    8) انتخاب آداپتورها (v2.3): در تنظیمات مشخص می‌کنید پایش و ری‌استارت
+//       فقط روی کدام آداپتورها اعمال شود (خالی = همه آداپتورهای غیرمجازی)
+//
+//  برنامه‌نویسی شده توسط کمالی
 // ============================================================================
 
 using System;
@@ -44,7 +48,7 @@ namespace NetworkWatchdog
     // ========================================================================
     internal static class AppInfo
     {
-        public const string Version = "2.2.0";
+        public const string Version = "2.3.0";
     }
 
     // ========================================================================
@@ -65,6 +69,7 @@ namespace NetworkWatchdog
         public int MaxRestartRetries { get; set; }        // تعداد تلاش مجدد هر آداپتور
         public string AdapterExcludePattern { get; set; } // الگوی حذف آداپتورهای مجازی
         public int LogMaxSizeKB { get; set; }             // حداکثر حجم لاگ
+        public string MonitoredAdapters { get; set; }     // آداپتورهای انتخابی کاربر (خالی = همه)
 
         public AppSettings()
         {
@@ -81,6 +86,7 @@ namespace NetworkWatchdog
             MaxRestartRetries = 3;
             AdapterExcludePattern = "Virtual|VMware|VirtualBox|Hyper-V|TAP|Tunnel|ISATAP|Teredo|Loopback|WAN Miniport|NDISWAN|Kernel Debug|QoS Packet Scheduler";
             LogMaxSizeKB = 512;
+            MonitoredAdapters = "";
         }
 
         // لیست‌ها از رشته‌های comma-separated ساخته می‌شوند (کامای فارسی هم پشتیبانی می‌شود)
@@ -92,6 +98,12 @@ namespace NetworkWatchdog
         public string[] GetLocalTargets()
         {
             return SplitTargets(LocalTargets);
+        }
+
+        // آداپتورهای انتخاب‌شده برای پایش/ری‌استارت (خالی = همه آداپتورهای غیرمجازی)
+        public string[] GetMonitoredAdapters()
+        {
+            return SplitTargets(MonitoredAdapters);
         }
 
         static string[] SplitTargets(string s)
@@ -123,6 +135,7 @@ namespace NetworkWatchdog
             c.MaxRestartRetries = MaxRestartRetries;
             c.AdapterExcludePattern = AdapterExcludePattern;
             c.LogMaxSizeKB = LogMaxSizeKB;
+            c.MonitoredAdapters = MonitoredAdapters;
             return c;
         }
     }
@@ -403,9 +416,10 @@ namespace NetworkWatchdog
         }
 
         // ------------------------------------------------------------------
-        //  کشف اهداف ری‌استارت (ترکیب WMI + netsh - مطابق اسکریپت پایتون)
+        //  کشف همه آداپتورهای غیرمجازی (ترکیب WMI + netsh - مطابق اسکریپت پایتون)
+        //  (برای فهرست تنظیمات و به‌عنوان ورودی فیلتر انتخاب کاربر)
         // ------------------------------------------------------------------
-        public static List<AdapterInfo> GetResetTargets(string excludePattern)
+        public static List<AdapterInfo> GetAllAdapters(string excludePattern)
         {
             Dictionary<string, AdapterInfo> map =
                 new Dictionary<string, AdapterInfo>(StringComparer.OrdinalIgnoreCase);
@@ -485,6 +499,95 @@ namespace NetworkWatchdog
             }
 
             return new List<AdapterInfo>(map.Values);
+        }
+
+        // ------------------------------------------------------------------
+        //  اعمال انتخاب کاربر روی فهرست آداپتورها (v2.3):
+        //  اگر لیست انتخاب خالی باشد → همه آداپتورهای غیرمجازی هدف قرار
+        //  می‌گیرند (رفتار پیش‌فرض). در غیر این صورت فقط موارد انتخابی.
+        // ------------------------------------------------------------------
+        public static List<AdapterInfo> GetResetTargets(string excludePattern, string[] selected)
+        {
+            List<AdapterInfo> all = GetAllAdapters(excludePattern);
+            if (selected == null || selected.Length == 0)
+            {
+                Logger.Write("DEBUG", "انتخاب آداپتور: هیچ انتخابی ثبت نشده - همه آداپتورهای غیرمجازی هدف هستند.");
+                return all;
+            }
+
+            List<AdapterInfo> result = new List<AdapterInfo>();
+            foreach (AdapterInfo a in all)
+            {
+                bool isSelected = false;
+                foreach (string s in selected)
+                {
+                    if (string.Compare(s, a.ConnectionId, StringComparison.OrdinalIgnoreCase) == 0)
+                    {
+                        isSelected = true;
+                        break;
+                    }
+                }
+                if (isSelected) result.Add(a);
+                else Logger.Write("DEBUG", "آداپتور «" + a.ConnectionId +
+                    "» نادیده گرفته شد (خارج از انتخاب کاربر).");
+            }
+
+            // هشدار برای انتخاب‌هایی که در سیستم وجود ندارند
+            foreach (string s in selected)
+            {
+                bool found = false;
+                foreach (AdapterInfo a in all)
+                {
+                    if (string.Compare(s, a.ConnectionId, StringComparison.OrdinalIgnoreCase) == 0)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    Logger.Write("WARN", "آداپتور انتخاب‌شده «" + s + "» در سیستم یافت نشد!");
+            }
+            return result;
+        }
+
+        // ------------------------------------------------------------------
+        //  ثبت وضعیت لحظه‌ای آداپتورهای انتخابی در لاگ (پایش شفاف - v2.3)
+        // ------------------------------------------------------------------
+        public static void LogSelectedStatus(string[] selected)
+        {
+            if (selected == null || selected.Length == 0) return;
+            try
+            {
+                Dictionary<string, bool> states =
+                    new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT NetConnectionID, NetEnabled FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        string connId = Convert.ToString(mo["NetConnectionID"]);
+                        if (connId == null || connId.Length == 0) continue;
+                        try { states[connId] = Convert.ToBoolean(mo["NetEnabled"]); }
+                        catch { }
+                    }
+                }
+                StringBuilder sb = new StringBuilder();
+                foreach (string s in selected)
+                {
+                    bool enabled;
+                    if (states.TryGetValue(s, out enabled))
+                        sb.Append("«").Append(s).Append("»=").Append(enabled ? "فعال" : "غیرفعال").Append("  ");
+                    else
+                        sb.Append("«").Append(s).Append("»=یافت‌نشد  ");
+                }
+                string text = sb.ToString().TrimEnd();
+                if (text.Length > 0)
+                    Logger.Write("INFO", "وضعیت آداپتورهای انتخابی (پایش): " + text);
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("DEBUG", "خواندن وضعیت آداپتورهای انتخابی ناموفق: " + ex.Message);
+            }
         }
 
         // ------------------------------------------------------------------
@@ -928,11 +1031,27 @@ namespace NetworkWatchdog
         CheckBox chkBalloons;
         CheckBox chkStartup;
 
+        // آداپتورهای انتخابی (v2.3)
+        CheckedListBox clbAdapters;
+        Button btnAdaptRefresh;
+        Button btnAdaptAll;
+        Button btnAdaptNone;
+        Label lblAdapterStatus;
+        List<AdapterManager.AdapterInfo> _adapterInfos = new List<AdapterManager.AdapterInfo>();
+        bool _adaptersLoaded;
+
         public SettingsForm(TrayContext owner, AppSettings current)
         {
             _owner = owner;
             _edit = current.Clone();
             BuildUi();
+            // فهرست آداپتورها پس از نمایش فرم در پس‌زمینه خوانده می‌شود
+            this.Shown += new EventHandler(OnFirstShown);
+        }
+
+        void OnFirstShown(object sender, EventArgs e)
+        {
+            LoadAdapters();
         }
 
         void BuildUi()
@@ -943,7 +1062,7 @@ namespace NetworkWatchdog
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.ClientSize = new Size(476, 536);
+            this.ClientSize = new Size(476, 756);
             this.RightToLeft = RightToLeft.Yes;
             this.RightToLeftLayout = true;
 
@@ -1057,35 +1176,94 @@ namespace NetworkWatchdog
             grpRestart.Controls.Add(lblExclude);
             grpRestart.Controls.Add(txtExclude);
 
+            // ---------- گروه: آداپتورهای تحت پایش (v2.3) ----------
+            GroupBox grpAdapters = new GroupBox();
+            grpAdapters.Text = "آداپتورهای تحت پایش و ری‌استارت";
+            grpAdapters.SetBounds(12, 434, 452, 192);
+            grpAdapters.RightToLeft = RightToLeft.Yes;
+
+            Label lblAdaptersHelp = new Label();
+            lblAdaptersHelp.Text = "آداپتورهایی که باید پایش شوند و ری‌استارت روی آن‌ها اعمال شود را علامت بزنید.\n" +
+                "اگر هیچ‌کدام انتخاب نشود، همه آداپتورهای غیرمجازی پایش و ری‌استارت می‌شوند.";
+            lblAdaptersHelp.AutoSize = false;
+            lblAdaptersHelp.SetBounds(10, 22, 432, 32);
+
+            clbAdapters = new CheckedListBox();
+            clbAdapters.SetBounds(10, 56, 432, 86);
+            clbAdapters.CheckOnClick = true;
+            clbAdapters.HorizontalScrollbar = true;
+            clbAdapters.RightToLeft = RightToLeft.Yes;
+
+            btnAdaptAll = new Button();
+            btnAdaptAll.Text = "انتخاب همه";
+            btnAdaptAll.SetBounds(10, 148, 88, 26);
+            btnAdaptAll.Click += new EventHandler(OnAdaptSelectAll);
+
+            btnAdaptNone = new Button();
+            btnAdaptNone.Text = "انتخاب هیچ‌کدام";
+            btnAdaptNone.SetBounds(101, 148, 104, 26);
+            btnAdaptNone.Click += new EventHandler(OnAdaptSelectNone);
+
+            btnAdaptRefresh = new Button();
+            btnAdaptRefresh.Text = "به‌روزرسانی فهرست";
+            btnAdaptRefresh.SetBounds(208, 148, 112, 26);
+            btnAdaptRefresh.Click += new EventHandler(OnAdaptRefresh);
+
+            lblAdapterStatus = new Label();
+            lblAdapterStatus.Text = "در حال بارگذاری آداپتورها...";
+            lblAdapterStatus.AutoSize = false;
+            lblAdapterStatus.TextAlign = ContentAlignment.MiddleLeft;
+            lblAdapterStatus.SetBounds(322, 150, 120, 22);
+            lblAdapterStatus.ForeColor = Color.FromArgb(90, 90, 90);
+
+            grpAdapters.Controls.Add(lblAdaptersHelp);
+            grpAdapters.Controls.Add(clbAdapters);
+            grpAdapters.Controls.Add(btnAdaptAll);
+            grpAdapters.Controls.Add(btnAdaptNone);
+            grpAdapters.Controls.Add(btnAdaptRefresh);
+            grpAdapters.Controls.Add(lblAdapterStatus);
+
             // ---------- سایر گزینه‌ها ----------
             chkStartup = new CheckBox();
             chkStartup.Text = "اجرای خودکار هنگام روشن شدن ویندوز (استارتآپ)";
             chkStartup.AutoSize = true;
-            chkStartup.SetBounds(12, 436, 452, 22);
+            chkStartup.SetBounds(12, 634, 452, 22);
             chkStartup.Checked = _edit.RunAtStartup;
 
             chkBalloons = new CheckBox();
             chkBalloons.Text = "نمایش اعلان‌ها (Balloon Tips) هنگام تغییر وضعیت";
             chkBalloons.AutoSize = true;
-            chkBalloons.SetBounds(12, 462, 452, 22);
+            chkBalloons.SetBounds(12, 660, 452, 22);
             chkBalloons.Checked = _edit.ShowBalloons;
 
             Button btnSave = new Button();
             btnSave.Text = "ذخیره";
-            btnSave.SetBounds(364, 492, 100, 32);
+            btnSave.SetBounds(364, 690, 100, 32);
             btnSave.Click += new EventHandler(OnSave);
 
             Button btnCancel = new Button();
             btnCancel.Text = "انصراف";
-            btnCancel.SetBounds(256, 492, 100, 32);
+            btnCancel.SetBounds(256, 690, 100, 32);
             btnCancel.DialogResult = DialogResult.Cancel;
+
+            // ---------- امضا (انتهای برنامه) ----------
+            Label lblCredit = new Label();
+            lblCredit.Text = "برنامه‌نویسی شده توسط کمالی";
+            lblCredit.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+            lblCredit.ForeColor = Color.FromArgb(46, 110, 62);
+            lblCredit.TextAlign = ContentAlignment.MiddleCenter;
+            lblCredit.BackColor = Color.FromArgb(240, 244, 240);
+            lblCredit.BorderStyle = BorderStyle.FixedSingle;
+            lblCredit.SetBounds(12, 728, 452, 24);
 
             this.Controls.Add(grpCheck);
             this.Controls.Add(grpRestart);
+            this.Controls.Add(grpAdapters);
             this.Controls.Add(chkStartup);
             this.Controls.Add(chkBalloons);
             this.Controls.Add(btnSave);
             this.Controls.Add(btnCancel);
+            this.Controls.Add(lblCredit);
             this.CancelButton = btnCancel;
             this.AcceptButton = btnSave;
         }
@@ -1117,9 +1295,107 @@ namespace NetworkWatchdog
             ns.ShowBalloons = chkBalloons.Checked;
             ns.RunAtStartup = chkStartup.Checked;
 
+            // آداپتورهای انتخابی (اگر فهرست هنوز بارگذاری نشده، مقدار قبلی حفظ می‌شود)
+            if (_adaptersLoaded)
+            {
+                StringBuilder sbAdapters = new StringBuilder();
+                for (int i = 0; i < clbAdapters.Items.Count; i++)
+                {
+                    if (clbAdapters.GetItemChecked(i))
+                    {
+                        if (sbAdapters.Length > 0) sbAdapters.Append(", ");
+                        sbAdapters.Append(_adapterInfos[i].ConnectionId);
+                    }
+                }
+                ns.MonitoredAdapters = sbAdapters.ToString();
+            }
+
             _owner.ApplySettings(ns);
             this.DialogResult = DialogResult.OK;
             this.Close();
+        }
+
+        // ------------------------------------------------------------------
+        //  آداپتورهای انتخابی: بارگذاری پس‌زمینه و دکمه‌ها (v2.3)
+        // ------------------------------------------------------------------
+        void LoadAdapters()
+        {
+            if (!IsHandleCreated) return;   // BeginInvoke نیازمند Handle است
+            lblAdapterStatus.Text = "در حال خواندن آداپتورها...";
+            btnAdaptRefresh.Enabled = false;
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                List<AdapterManager.AdapterInfo> list = null;
+                try { list = AdapterManager.GetAllAdapters(_edit.AdapterExcludePattern); }
+                catch { }
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        PopulateAdapters(list);
+                        btnAdaptRefresh.Enabled = true;
+                        lblAdapterStatus.Text = list == null
+                            ? "خطا در خواندن فهرست"
+                            : list.Count + " آداپتور یافت شد";
+                    });
+                }
+                catch { }
+            });
+        }
+
+        void PopulateAdapters(List<AdapterManager.AdapterInfo> list)
+        {
+            clbAdapters.BeginUpdate();
+            try
+            {
+                clbAdapters.Items.Clear();
+                _adapterInfos.Clear();
+                if (list != null)
+                {
+                    string[] sel = _edit.GetMonitoredAdapters();
+                    foreach (AdapterManager.AdapterInfo a in list)
+                    {
+                        string text = a.ConnectionId + "  |  " +
+                            (a.Enabled ? "فعال" : "غیرفعال") +
+                            (a.Description.Length > 0 ? "  |  " + a.Description : "");
+                        clbAdapters.Items.Add(text, IsAdapterSelected(sel, a.ConnectionId));
+                        _adapterInfos.Add(a);
+                    }
+                }
+                _adaptersLoaded = list != null;
+            }
+            finally
+            {
+                clbAdapters.EndUpdate();
+            }
+        }
+
+        static bool IsAdapterSelected(string[] sel, string connectionId)
+        {
+            if (sel == null) return false;
+            foreach (string s in sel)
+            {
+                if (string.Compare(s, connectionId, StringComparison.OrdinalIgnoreCase) == 0)
+                    return true;
+            }
+            return false;
+        }
+
+        void OnAdaptSelectAll(object sender, EventArgs e)
+        {
+            for (int i = 0; i < clbAdapters.Items.Count; i++)
+                clbAdapters.SetItemChecked(i, true);
+        }
+
+        void OnAdaptSelectNone(object sender, EventArgs e)
+        {
+            for (int i = 0; i < clbAdapters.Items.Count; i++)
+                clbAdapters.SetItemChecked(i, false);
+        }
+
+        void OnAdaptRefresh(object sender, EventArgs e)
+        {
+            LoadAdapters();
         }
     }
 
@@ -1151,6 +1427,7 @@ namespace NetworkWatchdog
         ToolStripStatusLabel _lblActivity;
         ToolStripStatusLabel _lblCount;
         ToolStripStatusLabel _lblFile;
+        ToolStripStatusLabel _lblCredit;
         Icon _ownIcon;
 
         bool _paused;
@@ -1242,10 +1519,16 @@ namespace NetworkWatchdog
             _lblFile = new ToolStripStatusLabel();
             _lblFile.Text = "فایل: " + Path.GetFileName(Logger.FilePath);
 
+            _lblCredit = new ToolStripStatusLabel();
+            _lblCredit.Text = "برنامه‌نویسی شده توسط کمالی";
+            _lblCredit.ForeColor = Color.FromArgb(46, 110, 62);
+            _lblCredit.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+
             _status = new StatusStrip();
             _status.Items.Add(_lblActivity);
             _status.Items.Add(_lblCount);
             _status.Items.Add(_lblFile);
+            _status.Items.Add(_lblCredit);
 
             this.Controls.Add(_txt);
             this.Controls.Add(_status);
@@ -1582,6 +1865,7 @@ namespace NetworkWatchdog
         ToolStripMenuItem _miOpenLogDir;
         ToolStripMenuItem _miStartup;
         ToolStripMenuItem _miUninstall;
+        ToolStripMenuItem _miAbout;
         ToolStripMenuItem _miExit;
 
         public AppSettings CurrentSettings
@@ -1605,6 +1889,7 @@ namespace NetworkWatchdog
             Logger.Write("INFO", "Network Watchdog شروع به کار کرد. نسخه: " + AppInfo.Version);
             Logger.Write("INFO", "نسخه ویندوز: " + Environment.OSVersion.VersionString);
             Logger.Write("INFO", "مسیر برنامه: " + StartupManager.ExePath);
+            Logger.Write("INFO", "برنامه‌نویسی شده توسط کمالی");
             Logger.Write("INFO", "========================================================");
 
             // در اولین اجرا استارتآپ ثبت می‌شود؛ در اجراهای بعدی هم self-heal می‌شود
@@ -1694,6 +1979,10 @@ namespace NetworkWatchdog
             _miUninstall.ForeColor = Color.FromArgb(170, 40, 40);
             _miUninstall.Click += new EventHandler(OnUninstall);
 
+            _miAbout = new ToolStripMenuItem();
+            _miAbout.Text = "درباره برنامه";
+            _miAbout.Click += new EventHandler(OnAbout);
+
             _miExit = new ToolStripMenuItem();
             _miExit.Text = "خروج";
             _miExit.Click += new EventHandler(OnExit);
@@ -1711,6 +2000,7 @@ namespace NetworkWatchdog
             _menu.Items.Add(_miStartup);
             _menu.Items.Add(_miUninstall);
             _menu.Items.Add(new ToolStripSeparator());
+            _menu.Items.Add(_miAbout);
             _menu.Items.Add(_miExit);
         }
 
@@ -1782,6 +2072,11 @@ namespace NetworkWatchdog
                 " | شبکه محلی=" + (local ? "متصل" : "قطع"));
 
             UpdateStatus(inet, local, s);
+
+            // نمایش وضعیت آداپتورهای انتخابی کاربر در لاگ (پایش شفاف - v2.3)
+            string[] monitoredAdapters = s.GetMonitoredAdapters();
+            if (monitoredAdapters.Length > 0)
+                AdapterManager.LogSelectedStatus(monitoredAdapters);
 
             // ---- حالت 1: اینترنت سالم ----
             if (inet)
@@ -1859,8 +2154,14 @@ namespace NetworkWatchdog
                 }
 
                 Logger.Write("INFO", "مرحله 1) جستجوی آداپتورهای شبکه (WMI + netsh)...");
+                string[] monitored = s.GetMonitoredAdapters();
+                if (monitored.Length > 0)
+                    Logger.Write("INFO", "انتخاب کاربر فعال است - ری‌استارت فقط روی این آداپتورها اعمال می‌شود: " +
+                        s.MonitoredAdapters);
+                else
+                    Logger.Write("INFO", "انتخاب خاصی ثبت نشده - همه آداپتورهای غیرمجازی هدف هستند.");
                 List<AdapterManager.AdapterInfo> adapters =
-                    AdapterManager.GetResetTargets(s.AdapterExcludePattern);
+                    AdapterManager.GetResetTargets(s.AdapterExcludePattern, monitored);
                 if (adapters.Count == 0)
                 {
                     Logger.Write("WARN", "هیچ آداپتور شبکه مناسب یافت نشد! " +
@@ -2193,6 +2494,21 @@ namespace NetworkWatchdog
             {
                 Shutdown();
             }
+        }
+
+        // --------------------------------------------------------------------
+        //  درباره برنامه
+        // --------------------------------------------------------------------
+        void OnAbout(object sender, EventArgs e)
+        {
+            MessageBox.Show(
+                "Network Watchdog  v" + AppInfo.Version + "\n\n" +
+                "مانیتور و بازیاب خودکار اتصال اینترنت\n" +
+                "همراه با محافظت شبکه محلی دوربین‌ها\n\n" +
+                "برنامه‌نویسی شده توسط کمالی\n\n" +
+                "https://github.com/Tobeseuss/network-adaptor-auto-reset",
+                "درباره Network Watchdog",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         void OnExit(object sender, EventArgs e)
