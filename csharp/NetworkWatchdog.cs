@@ -1065,6 +1065,8 @@ namespace NetworkWatchdog
             this.ClientSize = new Size(476, 756);
             this.RightToLeft = RightToLeft.Yes;
             this.RightToLeftLayout = true;
+            // در صفحه‌های کوچک (مثلاً 768px) اسکرول عمودی در دسترس باشد
+            this.AutoScroll = true;
 
             // ---------- گروه: بررسی اتصال ----------
             GroupBox grpCheck = new GroupBox();
