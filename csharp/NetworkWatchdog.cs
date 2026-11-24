@@ -19,6 +19,10 @@
 //       بستن برنامه، حذف EXE و در صورت درخواست، پاک کردن تنظیمات و لاگ
 //    8) انتخاب آداپتورها (v2.3): در تنظیمات مشخص می‌کنید پایش و ری‌استارت
 //       فقط روی کدام آداپتورها اعمال شود (خالی = همه آداپتورهای غیرمجازی)
+//    9) اصلاح v2.3.1: الگوی «حذف آداپتورهای مجازی» خالی از این پس یعنی
+//       «بدون حذف» (قبلاً Regex خالی با همه رشته‌ها مطابقت می‌داد و همه
+//       آداپتورها - حتی کارت فیزیکی - حذف می‌شدند!) و مقدار ذخیره‌شده
+//       هنگام باز شدن پنجره تنظیمات به‌درستی بازیابی می‌شود
 //
 //  برنامه‌نویسی شده توسط کمالی
 // ============================================================================
@@ -48,7 +52,7 @@ namespace NetworkWatchdog
     // ========================================================================
     internal static class AppInfo
     {
-        public const string Version = "2.3.0";
+        public const string Version = "2.3.1";
     }
 
     // ========================================================================
@@ -71,6 +75,11 @@ namespace NetworkWatchdog
         public int LogMaxSizeKB { get; set; }             // حداکثر حجم لاگ
         public string MonitoredAdapters { get; set; }     // آداپتورهای انتخابی کاربر (خالی = همه)
 
+        // الگوی پیش‌فرض حذف آداپتورهای مجازی (Regex - با دکمه «پیش‌فرض»
+        // در تنظیمات قابل بازیابی است)
+        public const string DefaultExcludePattern =
+            "Virtual|VMware|VirtualBox|Hyper-V|TAP|Tunnel|ISATAP|Teredo|Loopback|WAN Miniport|NDISWAN|Kernel Debug|QoS Packet Scheduler";
+
         public AppSettings()
         {
             CheckIntervalSeconds = 60;
@@ -84,7 +93,7 @@ namespace NetworkWatchdog
             RestartDelaySeconds = 5;
             AdapterUpWaitSeconds = 10;
             MaxRestartRetries = 3;
-            AdapterExcludePattern = "Virtual|VMware|VirtualBox|Hyper-V|TAP|Tunnel|ISATAP|Teredo|Loopback|WAN Miniport|NDISWAN|Kernel Debug|QoS Packet Scheduler";
+            AdapterExcludePattern = DefaultExcludePattern;
             LogMaxSizeKB = 512;
             MonitoredAdapters = "";
         }
@@ -424,6 +433,8 @@ namespace NetworkWatchdog
             Dictionary<string, AdapterInfo> map =
                 new Dictionary<string, AdapterInfo>(StringComparer.OrdinalIgnoreCase);
             Regex rx = BuildExcludeRegex(excludePattern);
+            Logger.Write("DEBUG", "الگوی حذف مجازی‌ها: " +
+                (rx == null ? "(خالی - هیچ آداپتوری حذف نمی‌شود)" : "«" + excludePattern.Trim() + "»"));
 
             // ---- منبع 1: WMI (یونیکد و مستقل از زبان ویندوز) ----
             try
@@ -439,7 +450,7 @@ namespace NetworkWatchdog
                         string connId = Convert.ToString(mo["NetConnectionID"]);
                         string devId = Convert.ToString(mo["DeviceID"]);
                         if (connId == null || connId.Length == 0) continue;
-                        if (rx.IsMatch(name) || rx.IsMatch(desc) || rx.IsMatch(connId)) continue;
+                        if (RxMatch(rx, name) || RxMatch(rx, desc) || RxMatch(rx, connId)) continue;
                         bool enabled = false;
                         try { enabled = Convert.ToBoolean(mo["NetEnabled"]); }
                         catch { }
@@ -477,7 +488,7 @@ namespace NetworkWatchdog
                 foreach (string nm in netshNames)
                 {
                     if (nm == null || nm.Length == 0) continue;
-                    if (rx.IsMatch(nm)) continue;
+                    if (RxMatch(rx, nm)) continue;
                     if (!map.ContainsKey(nm))
                     {
                         AdapterInfo ai = new AdapterInfo();
@@ -759,16 +770,31 @@ namespace NetworkWatchdog
             return "کد " + code;
         }
 
+        // ساخت Regex حذف آداپتورهای مجازی (اصلاح v2.3.1):
+        //  - الگوی خالی/فقط-فاصله → null یعنی «هیچ آداپتوری حذف نمی‌شود»
+        //    (نکته مهم: Regex خالی در .NET با «هر» رشته‌ای مطابقت می‌دهد و
+        //     قبلاً باعث حذف همه آداپتورها - حتی کارت فیزیکی - می‌شد)
+        //  - الگوی نامعتبر → الگوی امن پیش‌فرض
         static Regex BuildExcludeRegex(string excludePattern)
         {
+            if (excludePattern == null) return null;
+            if (excludePattern.Trim().Length == 0) return null;
             try
             {
                 return new Regex(excludePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
             }
             catch
             {
+                Logger.Write("WARN", "الگوی Regex نامعتبر است - الگوی امن پیش‌فرض اعمال می‌شود.");
                 return new Regex("Virtual|Loopback|Tunnel", RegexOptions.IgnoreCase);
             }
+        }
+
+        // بررسی مطابقت با شرط حذف (rx == null یعنی بدون هیچ حذفی)
+        static bool RxMatch(Regex rx, string s)
+        {
+            if (rx == null || s == null) return false;
+            return rx.IsMatch(s);
         }
 
         static CmdResult RunNetsh(string connectionId, string action)
@@ -1161,11 +1187,22 @@ namespace NetworkWatchdog
             numTimeout.Value = Math.Min(Math.Max(_edit.PingTimeoutMs, 200), 15000);
 
             Label lblExclude = new Label();
-            lblExclude.Text = "الگوی حذف آداپتورهای مجازی (Regex):";
+            lblExclude.Text = "الگوی حذف آداپتورهای مجازی (Regex؛ خالی = بدون حذف):";
             lblExclude.AutoSize = true;
-            lblExclude.SetBounds(10, 152, 280, 17);
+            lblExclude.SetBounds(10, 152, 432, 17);
             txtExclude = new TextBox();
-            txtExclude.SetBounds(10, 172, 432, 23);
+            txtExclude.SetBounds(10, 172, 328, 23);
+            // اصلاح v2.3.1: بازیابی مقدار ذخیره‌شده (قبلاً این فیلد خالی
+            // می‌ماند و با ذخیره تنظیمات، الگو ناخواسته پاک می‌شد)
+            txtExclude.Text = _edit.AdapterExcludePattern == null ? "" : _edit.AdapterExcludePattern;
+
+            Button btnExcludeDefault = new Button();
+            btnExcludeDefault.Text = "پیش‌فرض";
+            btnExcludeDefault.SetBounds(346, 171, 96, 25);
+            btnExcludeDefault.Click += delegate(object sender2, EventArgs e2)
+            {
+                txtExclude.Text = AppSettings.DefaultExcludePattern;
+            };
 
             grpRestart.Controls.Add(lblDelay);
             grpRestart.Controls.Add(numDelay);
@@ -1177,6 +1214,7 @@ namespace NetworkWatchdog
             grpRestart.Controls.Add(numTimeout);
             grpRestart.Controls.Add(lblExclude);
             grpRestart.Controls.Add(txtExclude);
+            grpRestart.Controls.Add(btnExcludeDefault);
 
             // ---------- گروه: آداپتورهای تحت پایش (v2.3) ----------
             GroupBox grpAdapters = new GroupBox();
@@ -1293,7 +1331,8 @@ namespace NetworkWatchdog
             ns.AdapterUpWaitSeconds = (int)numUpWait.Value;
             ns.MaxRestartRetries = (int)numRetries.Value;
             ns.PingTimeoutMs = (int)numTimeout.Value;
-            ns.AdapterExcludePattern = txtExclude.Text;
+            // الگوی خالی/فقط-فاصله به‌صورت خالی ذخیره می‌شود (= بدون حذف)
+            ns.AdapterExcludePattern = txtExclude.Text == null ? "" : txtExclude.Text.Trim();
             ns.ShowBalloons = chkBalloons.Checked;
             ns.RunAtStartup = chkStartup.Checked;
 
@@ -2166,8 +2205,11 @@ namespace NetworkWatchdog
                     AdapterManager.GetResetTargets(s.AdapterExcludePattern, monitored);
                 if (adapters.Count == 0)
                 {
-                    Logger.Write("WARN", "هیچ آداپتور شبکه مناسب یافت نشد! " +
-                        "(آداپتورهای مجازی با الگوی «" + s.AdapterExcludePattern + "» حذف شدند)");
+                    string patInfo = (s.AdapterExcludePattern == null ||
+                        s.AdapterExcludePattern.Trim().Length == 0)
+                        ? "بدون الگوی حذف"
+                        : "الگوی حذف: «" + s.AdapterExcludePattern.Trim() + "»";
+                    Logger.Write("WARN", "هیچ آداپتور شبکه مناسب یافت نشد! (" + patInfo + ")");
                     return false;
                 }
 
